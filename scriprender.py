@@ -1,12 +1,15 @@
+import os
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import Updater, CommandHandler, CallbackContext, Dispatcher
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
 from datetime import datetime, timedelta
-import os
+from flask import Flask, request
+from telegram.ext import Dispatcher, CommandHandler
 
 # Ganti dengan token bot kamu atau ambil dari environment variable
 TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # URL untuk webhook
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -20,8 +23,18 @@ def send_reminder(context: CallbackContext):
     job = context.job
     context.bot.send_message(chat_id=job.context['chat_id'], text=f"⏰ Pengingat: {job.context['message']}")
 
+# Flask app untuk webhook
+app = Flask(__name__)
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = Update.de_json(json_str, updater.bot)
+    dispatcher.process_update(update)
+    return 'ok', 200
+
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Halo! Saya bot pengingat. Gunakan: /ingatkan <menit> <pesan>")
+    update.message.reply_text("Halo! Saya bot pengingat UPDATE PER 2JAM . Gunakan: /ingatkan <menit> <pesan>")
 
 def ingatkan(update: Update, context: CallbackContext):
     try:
@@ -41,14 +54,19 @@ def ingatkan(update: Update, context: CallbackContext):
         update.message.reply_text("Format salah. Gunakan: /ingatkan <menit> <pesan>")
 
 def main():
+    # Set up Updater dan Dispatcher
     updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    dispatcher = updater.dispatcher
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("ingatkan", ingatkan))
+    # Daftarkan handler
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("ingatkan", ingatkan))
 
-    updater.start_polling()
-    updater.idle()
+    # Set webhook Telegram
+    updater.bot.set_webhook(url=WEBHOOK_URL + "/webhook")
+
+    # Mulai Flask server untuk webhook
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
 if __name__ == '__main__':
     main()
