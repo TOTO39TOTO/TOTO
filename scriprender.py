@@ -1,81 +1,208 @@
-import os
 import logging
-from datetime import datetime, timedelta
-from flask import Flask, request
+import datetime
+import pytz
+import os
+import asyncio
+from aiohttp import web
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
-from apscheduler.schedulers.background import BackgroundScheduler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    PicklePersistence,
+)
 
-# Mengambil token dari environment variable
-TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+# Setup logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
-# Jika TOKEN tidak ada, beri error yang lebih jelas
-if not TOKEN:
-    raise ValueError("Bot token is missing! Please set the BOT_TOKEN environment variable.")
+TOKEN = os.environ.get("TOKEN") or "YOUR_BOT_TOKEN_HERE"
+WEBHOOK_PATH = f"/{TOKEN}"
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")  # ex: https://yourapp.onrender.com
+WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}" if WEBHOOK_URL_BASE else None
 
-# Setup Logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Persistence untuk menyimpan data antar restart bot
+persistence = PicklePersistence(filepath="reminder_data.pkl")
+user_jobs = {}
+timezone = pytz.timezone("Asia/Jakarta")
 
-# Setup Scheduler
-scheduler = BackgroundScheduler()
-scheduler.start()
+# --- Handlers ---
 
-# Flask app untuk webhook
-app = Flask(__name__)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Halo! Gunakan /set jam:menit (contoh: /set 08:30 12:45) untuk pengingat harian.\n"
+        "/list untuk cek pengingat, /stop untuk hapus semua, /test untuk uji pengingat 1 menit.\n"
+        "/waktu untuk cek waktu server saat ini."
+    )
 
-# Fungsi untuk mengirim pengingat
-def send_reminder(context: CallbackContext):
-    job = context.job
-    context.bot.send_message(chat_id=job.context['chat_id'], text=f"⏰ Pengingat: {job.context['message']}")
+async def reminder(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data
+    logging.info(f"🔔 Menjalankan pengingat untuk chat_id {chat_id}")
+    await context.bot.send_message(
+        chat_id,
+        text="🔔 UPDATE LAPORAN PER 2 JAM !!! ' 🔔"
+    )
 
-# Start command
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Halo! Saya bot pengingat. Gunakan: /ingatkan <menit> <pesan>")
+async def set_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
 
-# Command untuk mengatur pengingat
-def ingatkan(update: Update, context: CallbackContext):
+    # Hapus job lama jika ada
+    if chat_id in user_jobs:
+        for job in user_jobs[chat_id]:
+            job.schedule_removal()
+        user_jobs.pop(chat_id)
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ Format salah! Gunakan: /set 08:30 12:45")
+        return
+
+    reminder_times = []
+    jobs = []
+
+    for waktu_str in args:
+        try:
+            hour, minute = map(int, waktu_str.split(":"))
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                raise ValueError("Jam atau menit tidak valid.")
+
+            waktu = datetime.time(hour=hour, minute=minute, tzinfo=timezone)
+
+            job = context.job_queue.run_daily(
+                reminder,
+                time=waktu,
+                chat_id=chat_id,
+                name=f"reminder_{waktu_str}",
+                data=chat_id,
+            )
+            jobs.append(job)
+            reminder_times.append(waktu_str)
+            logging.info(f"✅ Menjadwalkan pengingat {waktu_str} untuk chat_id {chat_id}")
+
+        except Exception as e:
+            await update.message.reply_text(f"⛔ Format salah atau waktu tidak valid: {waktu_str}")
+            logging.error(f"❌ Error parsing time {waktu_str}: {e}")
+            return
+
+    user_jobs[chat_id] = jobs
+    context.chat_data["reminders"] = reminder_times
+    await update.message.reply_text(f"✅ Pengingat diatur untuk: {', '.join(reminder_times)}")
+
+async def list_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reminders = context.chat_data.get("reminders")
+    if not reminders:
+        await update.message.reply_text("🚫 Tidak ada pengingat yang aktif.")
+    else:
+        await update.message.reply_text("📋 Pengingat aktif:\n" + "\n".join(f"- {w}" for w in reminders))
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in user_jobs:
+        await update.message.reply_text("🚫 Tidak ada pengingat yang aktif.")
+        return
+
+    for job in user_jobs[chat_id]:
+        job.schedule_removal()
+    user_jobs.pop(chat_id)
+    context.chat_data.clear()
+    await update.message.reply_text("🛑 Semua pengingat dihentikan.")
+
+async def test_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     try:
-        menit = int(context.args[0])
-        pesan = ' '.join(context.args[1:])
-        waktu = datetime.now() + timedelta(minutes=menit)
-
-        # Menjadwalkan pengingat
-        scheduler.add_job(
-            send_reminder,
-            trigger='date',
-            run_date=waktu,
-            context={'chat_id': update.message.chat_id, 'message': pesan}
+        context.job_queue.run_once(
+            reminder,
+            when=60,  # delay dalam detik (60 detik = 1 menit)
+            chat_id=chat_id,
+            name="test_reminder",
+            data=chat_id
         )
+        await update.message.reply_text("⏳ Pengingat akan dikirim dalam 1 menit.")
+    except Exception as e:
+        await update.message.reply_text("⚠️ Gagal menjadwalkan pengingat.")
+        logging.error(f"Error scheduling test reminder: {e}")
 
-        update.message.reply_text(f"Pengingat disetel dalam {menit} menit: \"{pesan}\"")
-    except (IndexError, ValueError):
-        update.message.reply_text("Format salah. Gunakan: /ingatkan <menit> <pesan>")
+async def waktu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.datetime.now(timezone)
+    await update.message.reply_text(f"Waktu server sekarang:\n{now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-# Webhook handler
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    json_str = request.get_data().decode('UTF-8')
-    update = Update.de_json(json_str, updater.bot)
-    dispatcher.process_update(update)
-    return 'ok', 200
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("❗ Exception occurred:", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(update.effective_chat.id, text="⚠️ Terjadi kesalahan. Silakan coba lagi nanti.")
+        except Exception:
+            pass
 
-# Setup Updater dan Dispatcher untuk webhook
-def main():
-    global updater
-    updater = Updater(TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+# --- JobQueue starter ---
+async def start_jobqueue(app):
+    await app.job_queue.start()
+    logging.info("✅ JobQueue dimulai.")
 
-    # Daftarkan handler
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("ingatkan", ingatkan))
+# --- AIOHTTP Server for webhook & health check ---
 
-    # Set webhook Telegram
-    updater.bot.set_webhook(url=WEBHOOK_URL + "/webhook")
+async def handle_root(request):
+    return web.Response(text="Bot is running")
 
-    # Mulai Flask untuk menerima request webhook
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+async def handle_webhook(request):
+    app = request.app["application"]
+    update = await request.json()
+    from telegram import Update as TgUpdate
+    tg_update = TgUpdate.de_json(update, app.bot)
+    await app.update_queue.put(tg_update)
+    return web.Response()
 
-if __name__ == '__main__':
-    main()
+async def main():
+    application = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .persistence(persistence)
+        .post_init(start_jobqueue)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("set", set_times))
+    application.add_handler(CommandHandler("list", list_times))
+    application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("test", test_reminder))
+    application.add_handler(CommandHandler("waktu", waktu))
+    application.add_error_handler(error_handler)
+
+    # Setup aiohttp webserver dengan webhook dan healthcheck
+    app = web.Application()
+    app["application"] = application
+    app.add_routes([
+        web.get("/", handle_root),
+        web.post(WEBHOOK_PATH, handle_webhook),
+    ])
+
+    if WEBHOOK_URL:
+        await application.bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"🌐 Webhook set to {WEBHOOK_URL}")
+    else:
+        logging.warning("⚠️ WEBHOOK_URL_BASE environment variable not set, webhook disabled!")
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.environ.get("PORT", 8000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"🌐 Webserver started on port {port}")
+
+    await application.initialize()
+    await application.start()
+
+    # Jangan polling karena pakai webhook
+    # await application.updater.start_polling()
+    # await application.updater.idle()
+
+    # Keep alive
+    while True:
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
