@@ -42,7 +42,7 @@ async def reminder(context: ContextTypes.DEFAULT_TYPE):
     logging.info(f"🔔 Menjalankan pengingat untuk chat_id {chat_id}")
     await context.bot.send_message(
         chat_id,
-        text="🔔 UPDATE LAPORAN PER 2 JAM !!! ' 🔔"
+        text="🔔 UPDATE LAPORAN JANGAN LUPA !!! ' 🔔"
     )
 
 async def set_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
