@@ -46,7 +46,7 @@ async def reminder(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=chat_id,
         message_thread_id=thread_id,
-        text="🔔 Woi jam berapa ini? Kau pikir tugas itu bisa siap sendiri? Jangan nanti-nanti kau bilang 'lupa pulak kau nanti' 🔔"
+        text="🔔 guys jangan lupa UPDATE !!! ' 🔔"
     )
 
 async def set_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
